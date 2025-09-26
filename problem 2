@@ -1,0 +1,55 @@
+from bcc import BPF
+import socket
+
+# eBPF program in C
+bpf_program = """
+#include <uapi/linux/bpf.h>
+#include <uapi/linux/if_ether.h>
+#include <uapi/linux/ip.h>
+#include <uapi/linux/tcp.h>
+#include <linux/sched.h>
+
+int filter(struct __sk_buff *skb) {
+    char comm[TASK_COMM_LEN];
+    bpf_get_current_comm(&comm, sizeof(comm));
+
+    // Only filter traffic for "myprocess"
+    if (__builtin_memcmp(comm, "myprocess", 9) != 0) {
+        return 1; // Accept
+    }
+
+    void *data = (void *)(long)skb->data;
+    void *data_end = (void *)(long)skb->data_end;
+
+    struct ethhdr *eth = data;
+    if ((void *)eth + sizeof(*eth) > data_end) return 0;
+
+    if (eth->h_proto != bpf_htons(ETH_P_IP)) return 1;
+
+    struct iphdr *ip = data + sizeof(*eth);
+    if ((void *)ip + sizeof(*ip) > data_end) return 0;
+
+    if (ip->protocol != IPPROTO_TCP) return 1;
+
+    struct tcphdr *tcp = (void *)ip + ip->ihl * 4;
+    if ((void *)tcp + sizeof(*tcp) > data_end) return 0;
+
+    // Allow only port 4040
+    if (bpf_ntohs(tcp->dest) == 4040) {
+        return 1; // Accept
+    }
+
+    return 0; // Drop
+}
+"""
+
+# Load and attach the eBPF program
+b = BPF(text=bpf_program)
+function = b.load_func("filter", BPF.SOCKET_FILTER)
+
+# Create raw socket and attach filter
+sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(3))
+sock.bind(("eth0", 0))  # Replace "eth0" with your interface
+b.attach_raw_socket(function, "eth0")
+
+print("eBPF filter loaded. Only port 4040 allowed for 'myprocess'.")
